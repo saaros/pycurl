@@ -1077,7 +1077,7 @@ util_write_callback(int flags, char *ptr, size_t size, size_t nmemb, void *strea
     }
     else if (PyInt_Check(result)) {
         long obj_size = PyInt_AsLong(result);
-        if (obj_size < 0 || obj_size > total_size) {
+        if ((obj_size < 0 || obj_size > total_size) && obj_size != CURL_WRITEFUNC_PAUSE) {
             PyErr_Format(ErrorObject, "invalid return value for write callback %ld %ld", (long)obj_size, (long)total_size);
             goto verbose_error;
         }
@@ -1085,7 +1085,7 @@ util_write_callback(int flags, char *ptr, size_t size, size_t nmemb, void *strea
     }
     else if (PyLong_Check(result)) {
         long obj_size = PyLong_AsLong(result);
-        if (obj_size < 0 || obj_size > total_size) {
+        if ((obj_size < 0 || obj_size > total_size) && obj_size != CURL_WRITEFUNC_PAUSE) {
             PyErr_Format(ErrorObject, "invalid return value for write callback %ld %ld", (long)obj_size, (long)total_size);
             goto verbose_error;
         }
@@ -1305,17 +1305,17 @@ read_callback(char *ptr, size_t size, size_t nmemb, void *stream)
     }
     else if (PyInt_Check(result)) {
         long r = PyInt_AsLong(result);
-        if (r != CURL_READFUNC_ABORT) {
+        if (r != CURL_READFUNC_ABORT && r != CURL_READFUNC_PAUSE) {
             goto type_error;
         }
-        /* ret is CURL_READUNC_ABORT */
+        ret = (size_t) r;
     }
     else if (PyLong_Check(result)) {
         long r = PyLong_AsLong(result);
-        if (r != CURL_READFUNC_ABORT) {
+        if (r != CURL_READFUNC_ABORT && r != CURL_READFUNC_PAUSE) {
             goto type_error;
         }
-        /* ret is CURL_READUNC_ABORT */
+        ret = (size_t) r;
     }
     else {
     type_error:
@@ -1485,6 +1485,42 @@ verbose_error:
     goto silent_error;
 }
 
+
+/* ------------------------ pause ------------------------ */
+
+static PyObject *
+do_curl_pause(CurlObject *self, PyObject *arg)
+{
+    PyThreadState *prev_state;
+    long bitmask;
+    int res;
+
+    if (check_curl_state(self, 1, "pause")) {
+        return NULL;
+    }
+
+    if (! PyInt_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "Curl.pause expects a single integer argument");
+        return NULL;
+    }
+
+    bitmask = PyInt_AsLong(arg);
+
+    /* Save handle to current thread (used as context for python callbacks) */
+    prev_state = self->state;
+    self->state = PyThreadState_Get();
+    assert(self->state != NULL);
+    Py_BEGIN_ALLOW_THREADS
+    res = curl_easy_pause(self->handle, bitmask);
+    Py_END_ALLOW_THREADS
+    self->state = prev_state;
+
+    if (res != CURLE_OK) {
+        CURLERROR_RETVAL();
+    }
+    Py_INCREF(Py_None);
+    return Py_None;
+}
 
 /* ------------------------ reset ------------------------ */
 
@@ -3006,6 +3042,10 @@ static const char co_setopt_doc[] = "setopt(option, parameter) -> None.  "
 static const char co_unsetopt_doc[] = "unsetopt(option) -> None.  "
     "Reset curl session option to default value.  "
     "Throws pycurl.error exception upon failure.\n";
+static const char co_pause_doc[] = "pause(bitmask) -> None.  "
+    "Pauses or continues a curl handle.  "
+    "Bitmask may be a combination of PAUSE_ALL, PAUSE_RECV, PAUSE_SEND, CONT_ALL, CONT_RECV and CONT_SEND.  "
+    "Throws pycurl.error exception upon failure.\n";
 static const char co_reset_doc[] = "reset() -> None.  "
     "Reset all options set on curl handle to default values, but preserves live connections, session ID cache, DNS cache, cookies, and shares.\n";
 static const char co_multi_fdset_doc[] = "fdset() -> Tuple.  "
@@ -3031,6 +3071,7 @@ static PyMethodDef curlobject_methods[] = {
     {"perform", (PyCFunction)do_curl_perform, METH_NOARGS, co_perform_doc},
     {"setopt", (PyCFunction)do_curl_setopt, METH_VARARGS, co_setopt_doc},
     {"unsetopt", (PyCFunction)do_curl_unsetopt, METH_VARARGS, co_unsetopt_doc},
+    {"pause", (PyCFunction)do_curl_pause, METH_O, co_pause_doc},
     {"reset", (PyCFunction)do_curl_reset, METH_NOARGS, co_reset_doc},
     {NULL, NULL, 0, NULL}
 };
@@ -3527,6 +3568,16 @@ initpycurl(void)
 
     /* Abort curl_read_callback(). */
     insint_c(d, "READFUNC_ABORT", CURL_READFUNC_ABORT);
+
+    /* Pause curl_read_callback() or curl_write_callback() */
+    insint_c(d, "READFUNC_PAUSE", CURL_READFUNC_PAUSE);
+    insint_c(d, "WRITEFUNC_PAUSE", CURL_WRITEFUNC_PAUSE);
+    insint_c(d, "PAUSE_ALL", CURLPAUSE_ALL);
+    insint_c(d, "PAUSE_RECV", CURLPAUSE_RECV);
+    insint_c(d, "PAUSE_SEND", CURLPAUSE_SEND);
+    insint_c(d, "CONT_ALL", CURLPAUSE_CONT);
+    insint_c(d, "CONT_RECV", CURLPAUSE_RECV_CONT);
+    insint_c(d, "CONT_SEND", CURLPAUSE_SEND_CONT);
 
     /* constants for ioctl callback return values */
     insint_c(d, "IOE_OK", CURLIOE_OK);
